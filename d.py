@@ -1,4 +1,4 @@
-# modules/sender.py - Avtomatik xabar yuboruvchi modul
+# modules/sender.py - Tuzatilgan versiya
 
 import asyncio
 import json
@@ -7,16 +7,16 @@ import time
 from datetime import datetime, timedelta
 from typing import Dict, Any, Optional, List
 
-from telethon import Button
+from telethon import Button, events
 from telethon.tl.custom import Message
 from telethon.tl.types import (
     MessageMediaPhoto, MessageMediaDocument, 
-    MessageMediaWebPage, MessageMediaAudio,
-    MessageMediaVoice, MessageMediaVideo
+    MessageMediaAudio, MessageMediaVoice, 
+    MessageMediaVideo, MessageMediaWebPage
 )
 
 class SenderMod:
-    """Avtomatik xabar yuboruvchi modul - 24/7 ishlaydi"""
+    """Avtomatik xabar yuboruvchi - 1 post, minut bilan interval"""
     
     strings = {"name": "SenderMod"}
     
@@ -35,19 +35,17 @@ class SenderMod:
         self._load_settings()
         print("✅ SenderMod tayyor!")
         
-        # Avtomatik ishga tushirish
         if self.config.get("auto_start", True):
             await self.start_sending()
     
     def _load_settings(self):
         default = {
-            "interval": 60,  # soniyalarda
-            "timezone": 5,  # UTC+5
-            "all_groups": True,
+            "interval_minutes": 5,
+            "all_groups": False,
             "selected_groups": [],
-            "saved_posts": {},
+            "saved_post": None,
+            "post_active": False,
             "auto_start": True,
-            "post_status": {},  # post_id -> {"active": True/False, "last_sent": timestamp}
             "send_count": 0,
             "last_send": None
         }
@@ -72,18 +70,15 @@ class SenderMod:
             print(f"❌ Saqlash xatosi: {e}")
     
     def _get_current_time(self):
-        tz = self.config.get("timezone", 5)
-        return datetime.utcnow() + timedelta(hours=tz)
+        return datetime.now()
     
     def _format_time(self, dt):
         return dt.strftime("%d.%m.%Y %H:%M:%S")
     
     def _get_target_chats(self):
-        """Yuboriladigan guruhlar ro'yxati"""
         chats = []
         
-        if self.config.get("all_groups", True):
-            # Barcha guruhlar (bot a'zo bo'lgan)
+        if self.config.get("all_groups", False):
             try:
                 for dialog in self.client.iter_dialogs():
                     if dialog.is_group:
@@ -91,7 +86,6 @@ class SenderMod:
             except:
                 pass
         else:
-            # Tanlangan guruhlar
             for group_name in self.config.get("selected_groups", []):
                 try:
                     entity = self.client.get_entity(group_name)
@@ -101,21 +95,19 @@ class SenderMod:
         
         return chats
     
-    # ==================== ASOSIY SENDER FUNKSIYASI ====================
+    # ==================== ASOSIY SENDER ====================
     
-    async def _send_post_to_chat(self, chat, post_id, post_data):
-        """Postni chatga yuborish"""
+    async def _send_post_to_chat(self, chat):
+        post_data = self.config.get("saved_post")
+        
+        if not post_data or not self.config.get("post_active", False):
+            return False
+        
         try:
-            # Post holatini tekshirish
-            status = self.config.get("post_status", {}).get(post_id, {})
-            if not status.get("active", True):
-                return False
-            
             text = post_data.get("text", "")
             media_path = post_data.get("media")
             
             if media_path and os.path.exists(media_path):
-                # Media bilan yuborish
                 await self.client.send_file(
                     chat,
                     media_path,
@@ -123,15 +115,10 @@ class SenderMod:
                     parse_mode='html'
                 )
             else:
-                # Faqat matn
                 await self.client.send_message(chat, text, parse_mode='html')
             
-            # Statistikani yangilash
             self.config["send_count"] = self.config.get("send_count", 0) + 1
             self.config["last_send"] = self._format_time(self._get_current_time())
-            
-            status["last_sent"] = time.time()
-            self.config["post_status"][post_id] = status
             self._save_settings()
             
             return True
@@ -141,41 +128,28 @@ class SenderMod:
             return False
     
     async def _sender_loop(self):
-        """Asosiy yuborish sikli - 24/7"""
         print("🔄 Sender loop ishga tushdi!")
         
         while self._is_running:
             try:
-                # Vaqt oralig'ini olish
-                interval = self.config.get("interval", 60)
+                interval = self.config.get("interval_minutes", 5) * 60
                 
-                # Yuboriladigan postlarni olish (faqat faollari)
-                saved_posts = self.config.get("saved_posts", {})
-                post_status = self.config.get("post_status", {})
+                post_data = self.config.get("saved_post")
+                is_active = self.config.get("post_active", False)
                 
-                active_posts = []
-                for post_id, data in saved_posts.items():
-                    status = post_status.get(post_id, {})
-                    if status.get("active", True):
-                        active_posts.append((post_id, data))
-                
-                if active_posts:
-                    # Guruhlarni olish
+                if post_data and is_active:
                     chats = self._get_target_chats()
                     
                     if chats:
-                        print(f"📤 {len(active_posts)} ta post {len(chats)} ta guruhga yuborilmoqda...")
-                        
-                        for post_id, post_data in active_posts:
-                            for chat in chats:
-                                await self._send_post_to_chat(chat, post_id, post_data)
-                                await asyncio.sleep(1)  # Spam oldini olish
+                        print(f"📤 {len(chats)} ta guruhga yuborilmoqda...")
+                        for chat in chats:
+                            await self._send_post_to_chat(chat)
+                            await asyncio.sleep(2)
                     else:
-                        print("⚠️ Yuborish uchun guruh topilmadi")
+                        print("⚠️ Yuborish uchun guruh yo'q")
                 else:
-                    print("💤 Faol postlar yo'q")
+                    print("💤 Post mavjud emas yoki o'chirilgan")
                 
-                # Intervalgacha kutish
                 await asyncio.sleep(interval)
                 
             except asyncio.CancelledError:
@@ -188,128 +162,82 @@ class SenderMod:
     # ==================== BUYRUQLAR ====================
     
     async def settings(self, message):
-        """Sozlamalar paneli - .settings"""
-        posts = self.config.get("saved_posts", {})
-        post_status = self.config.get("post_status", {})
-        active_posts = sum(1 for p in posts if post_status.get(p, {}).get("active", True))
+        post_data = self.config.get("saved_post")
+        is_active = self.config.get("post_active", False)
         
         text = (
             f"⚙️ **Sozlamalar paneli**\n\n"
-            f"🕐 **Vaqt zonasi:** UTC+{self.config.get('timezone', 5)}\n"
-            f"⏱ **Oraliq vaqt:** {self.config.get('interval', 60)} soniya\n"
-            f"🔄 **Barcha guruhlar:** {'✅ Yoqilgan' if self.config.get('all_groups', True) else '❌ Oʻchirilgan'}\n"
+            f"⏱ **Oraliq vaqt:** {self.config.get('interval_minutes', 5)} daqiqa\n"
+            f"🔄 **Barcha guruhlar:** {'✅ Yoqilgan' if self.config.get('all_groups', False) else '❌ Oʻchirilgan'}\n"
             f"📋 **Tanlangan guruhlar:** {len(self.config.get('selected_groups', []))} ta\n"
-            f"📦 **Saqlangan postlar:** {len(posts)} ta ({active_posts} ta faol)\n"
+            f"📦 **Post:** {'✅ Bor' if post_data else '❌ Yoʻq'}\n"
+            f"🔄 **Post holati:** {'✅ Faol' if is_active else '❌ Oʻchirilgan'}\n"
             f"📊 **Jami yuborilgan:** {self.config.get('send_count', 0)} ta\n"
             f"🕐 **Oxirgi yuborish:** {self.config.get('last_send', 'Yoʻq')}\n"
-            f"🔄 **Holat:** {'✅ Ishlamoqda' if self._is_running else '❌ Toʻxtatilgan'}\n\n"
+            f"🔄 **Bot holati:** {'✅ Ishlamoqda' if self._is_running else '❌ Toʻxtatilgan'}\n\n"
             f"📝 **Buyruqlar:**\n"
-            f"  `.interval 120` - Vaqt oraligʻini oʻrnatish\n"
-            f"  `.settimezone 5` - Vaqt zonasini oʻrnatish\n"
-            f"  `.groups on/off` - Barcha guruhlarni yoqish/oʻchirish\n"
-            f"  `.addgroup @username` - Guruh qoʻshish\n"
-            f"  `.delgroup @username` - Guruh oʻchirish\n"
-            f"  `.listgroups` - Guruhlar roʻyxati\n"
-            f"  `.copy` - Postni saqlash (reply qiling)\n"
-            f"  `.myposts` - Saqlangan postlar\n"
-            f"  `.poston/off <id>` - Postni yoqish/oʻchirish\n"
+            f"  `.interval 5` - Vaqt oraligʻi (daqiqa)\n"
+            f"  `.add` - Guruh qoʻshish (guruhda yozing)\n"
+            f"  `.del @username` - Guruh oʻchirish\n"
+            f"  `.list` - Guruhlar roʻyxati\n"
+            f"  `.copy` - Post saqlash (reply qiling)\n"
+            f"  `.show` - Saqlangan postni koʻrish\n"
+            f"  `.poston` - Postni yoqish\n"
+            f"  `.postoff` - Postni oʻchirish\n"
+            f"  `.delpost` - Postni butunlay oʻchirish\n"
             f"  `.start` - Yuborishni boshlash\n"
             f"  `.stop` - Yuborishni toʻxtatish"
         )
         
-        # Inline tugmalar
         buttons = [
-            [Button.inline("📦 Postlar", b"show_posts")],
-            [Button.inline("▶️ Boshlash", b"start_sender"), Button.inline("⏹ To'xtatish", b"stop_sender")],
-            [Button.inline("📊 Statistika", b"show_stats")]
+            [Button.inline("📦 Post", b"show_post"), Button.inline("📊 Statistika", b"show_stats")],
+            [Button.inline("▶️ Boshlash", b"start_sender"), Button.inline("⏹ To'xtatish", b"stop_sender")]
         ]
         
         await message.edit(text, buttons=buttons)
     
     async def interval(self, message):
-        """Oraliq vaqtni o'rnatish - .interval 120"""
         args = message.raw_text.split(maxsplit=1)
         args = args[1] if len(args) > 1 else ""
         
         if not args:
-            await message.edit("❌ Vaqtni kiriting!\nMisol: `.interval 120` (soniyalarda)")
+            await message.edit("❌ Vaqtni kiriting!\nMisol: `.interval 5` (daqiqalarda)")
             return
         
         try:
-            interval = int(args.strip())
-            if interval < 10:
-                await message.edit("❌ Minimal interval 10 soniya")
+            minutes = int(args.strip())
+            if minutes < 1:
+                await message.edit("❌ Minimal interval 1 daqiqa")
                 return
             
-            self.config["interval"] = interval
+            self.config["interval_minutes"] = minutes
             self._save_settings()
-            await message.edit(f"✅ Oraliq vaqt {interval} soniyaga oʻrnatildi!")
+            await message.edit(f"✅ Oraliq vaqt {minutes} daqiqaga oʻrnatildi!")
         except ValueError:
             await message.edit("❌ To'g'ri raqam kiriting!")
     
-    async def settimezone(self, message):
-        """Vaqt zonasini o'rnatish - .settimezone 5"""
-        args = message.raw_text.split(maxsplit=1)
-        args = args[1] if len(args) > 1 else ""
+    async def add(self, message):
+        chat = await message.get_chat()
         
-        if not args:
-            await message.edit("❌ Vaqt zonasini kiriting!\nMisol: `.settimezone 5`")
+        if not chat.is_group:
+            await message.edit("❌ Bu buyruq faqat guruhda ishlaydi!")
             return
         
-        try:
-            tz = int(args.strip())
-            if tz < -12 or tz > 14:
-                await message.edit("❌ Vaqt zonasi -12 dan 14 gacha")
-                return
-            
-            self.config["timezone"] = tz
+        group_name = f"@{chat.username}" if chat.username else str(chat.id)
+        
+        if group_name not in self.config["selected_groups"]:
+            self.config["selected_groups"].append(group_name)
             self._save_settings()
-            await message.edit(f"✅ Vaqt zonasi UTC+{tz} ga oʻrnatildi!")
-        except ValueError:
-            await message.edit("❌ To'g'ri raqam kiriting!")
-    
-    async def groups(self, message):
-        """Barcha guruhlarni yoqish/o'chirish - .groups on/off"""
-        args = message.raw_text.split(maxsplit=1)
-        args = args[1] if len(args) > 1 else ""
-        
-        if not args or args.lower() not in ['on', 'off']:
-            await message.edit("❌ `.groups on` yoki `.groups off`")
-            return
-        
-        self.config["all_groups"] = args.lower() == 'on'
-        self._save_settings()
-        
-        status = "✅ YOQILDI" if self.config["all_groups"] else "❌ OʻCHIRILDI"
-        await message.edit(f"🔄 Barcha guruhlar {status}")
-    
-    async def addgroup(self, message):
-        """Guruh qo'shish - .addgroup @username"""
-        args = message.raw_text.split(maxsplit=1)
-        args = args[1] if len(args) > 1 else ""
-        
-        if not args:
-            await message.edit("❌ Guruh nomini kiriting!\nMisol: `.addgroup @mygroup`")
-            return
-        
-        group = args.strip()
-        if not group.startswith('@'):
-            group = '@' + group
-        
-        if group not in self.config["selected_groups"]:
-            self.config["selected_groups"].append(group)
-            self._save_settings()
-            await message.edit(f"✅ `{group}` qoʻshildi!")
+            await message.edit(f"✅ **{chat.title}** qoʻshildi!\n📋 Jami: {len(self.config['selected_groups'])} ta")
         else:
-            await message.edit(f"⚠️ `{group}` allaqachon roʻyxatda")
+            await message.edit(f"⚠️ **{chat.title}** allaqachon roʻyxatda")
     
-    async def delgroup(self, message):
-        """Guruh o'chirish - .delgroup @username"""
+    async def delete(self, message):
         args = message.raw_text.split(maxsplit=1)
         args = args[1] if len(args) > 1 else ""
         
         if not args:
-            await message.edit("❌ Guruh nomini kiriting!")
+            await message.edit("❌ Guruh nomini kiriting!\nMisol: `.del @mygroup`")
             return
         
         group = args.strip()
@@ -323,24 +251,19 @@ class SenderMod:
         else:
             await message.edit(f"❌ `{group}` topilmadi")
     
-    async def listgroups(self, message):
-        """Guruhlar ro'yxati - .listgroups"""
+    async def list(self, message):
         groups = self.config.get("selected_groups", [])
         
         if not groups:
-            await message.edit("📋 Hech qanday guruh tanlanmagan")
+            await message.edit("📋 Hech qanday guruh tanlanmagan\n\n🔄 `.add` deb guruhda yozing")
             return
         
         text = f"📋 **Tanlangan guruhlar ({len(groups)}):**\n\n"
         text += "\n".join(f"• {g}" for g in groups)
-        text += f"\n\n🔄 Barcha guruhlar: {'✅' if self.config.get('all_groups', True) else '❌'}"
         
         await message.edit(text)
     
-    # ==================== COPY BUYRUG'I ====================
-    
     async def copy(self, message):
-        """Postni saqlash - .copy (reply qiling)"""
         reply = await message.get_reply_message()
         
         if not reply:
@@ -348,10 +271,7 @@ class SenderMod:
             return
         
         try:
-            post_id = f"post_{int(time.time())}"
-            
             post_data = {
-                "id": post_id,
                 "text": reply.raw_text or reply.text or "",
                 "media": None,
                 "media_type": None,
@@ -360,11 +280,10 @@ class SenderMod:
                 "chat": reply.chat_id
             }
             
-            # Mediani saqlash
             if reply.media:
                 try:
                     os.makedirs("modules/media", exist_ok=True)
-                    media_path = f"modules/media/{post_id}"
+                    media_path = f"modules/media/post_{int(time.time())}"
                     
                     if reply.photo:
                         file_path = await reply.download_media(file=media_path + ".jpg")
@@ -390,10 +309,6 @@ class SenderMod:
                         file_path = await reply.download_media(file=media_path + ".webp")
                         post_data["media"] = file_path
                         post_data["media_type"] = "sticker"
-                    elif reply.gif:
-                        file_path = await reply.download_media(file=media_path + ".gif")
-                        post_data["media"] = file_path
-                        post_data["media_type"] = "gif"
                     else:
                         file_path = await reply.download_media(file=media_path)
                         post_data["media"] = file_path
@@ -401,138 +316,87 @@ class SenderMod:
                 except Exception as e:
                     print(f"Media saqlash xatosi: {e}")
             
-            # Saqlash
-            saved_posts = self.config.get("saved_posts", {})
-            saved_posts[post_id] = post_data
-            self.config["saved_posts"] = saved_posts
+            old_post = self.config.get("saved_post")
+            if old_post and old_post.get("media") and os.path.exists(old_post["media"]):
+                try:
+                    os.remove(old_post["media"])
+                except:
+                    pass
             
-            # Holatni qo'shish
-            if "post_status" not in self.config:
-                self.config["post_status"] = {}
-            self.config["post_status"][post_id] = {"active": True, "last_sent": None}
-            
+            self.config["saved_post"] = post_data
+            self.config["post_active"] = True
             self._save_settings()
             
             await message.edit(
                 f"✅ **Post saqlandi!**\n\n"
-                f"🆔 ID: `{post_id}`\n"
                 f"📝 Matn: {len(post_data['text'])} belgi\n"
                 f"🖼 Media: {'✅ Bor' if post_data['media'] else '❌ Yoʻq'}\n"
                 f"📅 Sana: {post_data['date']}\n"
                 f"🔄 Holat: ✅ Faol\n\n"
-                f"📤 `.myposts` bilan koʻring"
+                f"📤 `.show` bilan koʻring"
             )
             
         except Exception as e:
             await message.edit(f"❌ Xatolik: {e}")
-            traceback.print_exc()
     
-    async def myposts(self, message):
-        """Saqlangan postlar - .myposts"""
-        saved_posts = self.config.get("saved_posts", {})
-        post_status = self.config.get("post_status", {})
+    async def show(self, message):
+        post_data = self.config.get("saved_post")
         
-        if not saved_posts:
+        if not post_data:
             await message.edit("📦 Hech qanday post saqlanmagan")
             return
         
-        text = f"📦 **Saqlangan postlar ({len(saved_posts)}):**\n\n"
+        is_active = self.config.get("post_active", False)
         
-        for post_id, data in list(saved_posts.items())[:10]:
-            status = post_status.get(post_id, {}).get("active", True)
-            status_icon = "✅" if status else "❌"
-            text += f"• **ID:** `{post_id}` {status_icon}\n"
-            text += f"  📅 {data.get('date', 'Nomaʼlum')}\n"
-            text += f"  📝 {data.get('text', '')[:50]}...\n\n"
-        
-        if len(saved_posts) > 10:
-            text += f"\n📌 Jami: {len(saved_posts)} ta post\n"
-        
-        text += f"\n📤 `.poston/off <id>` - Yoqish/oʻchirish"
+        text = (
+            f"📦 **Saqlangan post**\n\n"
+            f"📝 Matn: {post_data.get('text', '')[:200]}\n"
+            f"🖼 Media: {'✅ Bor' if post_data.get('media') else '❌ Yoʻq'}\n"
+            f"📅 Sana: {post_data.get('date', 'Nomaʼlum')}\n"
+            f"🔄 Holat: {'✅ Faol' if is_active else '❌ Oʻchirilgan'}\n\n"
+            f"📤 `.poston` - Yoqish | `.postoff` - Oʻchirish"
+        )
         
         await message.edit(text)
     
     async def poston(self, message):
-        """Postni yoqish - .poston post_id"""
-        args = message.raw_text.split(maxsplit=1)
-        args = args[1] if len(args) > 1 else ""
-        
-        if not args:
-            await message.edit("❌ Post ID sini kiriting!\nMisol: `.poston post_123456`")
+        if not self.config.get("saved_post"):
+            await message.edit("❌ Post saqlanmagan! `.copy` bilan saqlang")
             return
         
-        post_id = args.strip()
-        saved_posts = self.config.get("saved_posts", {})
-        
-        if post_id not in saved_posts:
-            await message.edit(f"❌ `{post_id}` topilmadi!")
-            return
-        
-        if "post_status" not in self.config:
-            self.config["post_status"] = {}
-        self.config["post_status"][post_id] = {"active": True, "last_sent": None}
+        self.config["post_active"] = True
         self._save_settings()
-        
-        await message.edit(f"✅ `{post_id}` faollashtirildi!")
+        await message.edit("✅ Post faollashtirildi!")
     
-    async def posto ff(self, message):
-        """Postni o'chirish - .postoff post_id"""
-        args = message.raw_text.split(maxsplit=1)
-        args = args[1] if len(args) > 1 else ""
-        
-        if not args:
-            await message.edit("❌ Post ID sini kiriting!\nMisol: `.postoff post_123456`")
+    async def postoff(self, message):  # Tuzatilgan nom
+        if not self.config.get("saved_post"):
+            await message.edit("❌ Post saqlanmagan")
             return
         
-        post_id = args.strip()
-        saved_posts = self.config.get("saved_posts", {})
-        
-        if post_id not in saved_posts:
-            await message.edit(f"❌ `{post_id}` topilmadi!")
-            return
-        
-        if "post_status" not in self.config:
-            self.config["post_status"] = {}
-        self.config["post_status"][post_id] = {"active": False, "last_sent": None}
+        self.config["post_active"] = False
         self._save_settings()
-        
-        await message.edit(f"✅ `{post_id}` oʻchirildi!")
+        await message.edit("✅ Post oʻchirildi!")
     
     async def delpost(self, message):
-        """Postni butunlay o'chirish - .delpost post_id"""
-        args = message.raw_text.split(maxsplit=1)
-        args = args[1] if len(args) > 1 else ""
+        post_data = self.config.get("saved_post")
         
-        if not args:
-            await message.edit("❌ Post ID sini kiriting!")
+        if not post_data:
+            await message.edit("❌ Post saqlanmagan")
             return
         
-        post_id = args.strip()
-        saved_posts = self.config.get("saved_posts", {})
-        
-        if post_id not in saved_posts:
-            await message.edit(f"❌ `{post_id}` topilmadi!")
-            return
-        
-        # Median o'chirish
-        post_data = saved_posts[post_id]
         if post_data.get("media") and os.path.exists(post_data["media"]):
             try:
                 os.remove(post_data["media"])
             except:
                 pass
         
-        del saved_posts[post_id]
-        if "post_status" in self.config and post_id in self.config["post_status"]:
-            del self.config["post_status"][post_id]
-        
+        self.config["saved_post"] = None
+        self.config["post_active"] = False
         self._save_settings()
-        await message.edit(f"✅ `{post_id}` oʻchirildi!")
-    
-    # ==================== START/STOP ====================
+        
+        await message.edit("✅ Post butunlay oʻchirildi!")
     
     async def start(self, message):
-        """Yuborishni boshlash - .start"""
         if self._is_running:
             await message.edit("⚠️ Yuborish allaqachon ishlamoqda!")
             return
@@ -541,7 +405,6 @@ class SenderMod:
         await message.edit("✅ Yuborish boshlandi!")
     
     async def stop(self, message):
-        """Yuborishni to'xtatish - .stop"""
         if not self._is_running:
             await message.edit("⚠️ Yuborish to'xtatilgan!")
             return
@@ -550,7 +413,6 @@ class SenderMod:
         await message.edit("⏹ Yuborish to'xtatildi!")
     
     async def start_sending(self):
-        """Yuborishni boshlash (ichki)"""
         if self._is_running:
             return
         
@@ -560,7 +422,6 @@ class SenderMod:
         self._save_settings()
     
     async def stop_sending(self):
-        """Yuborishni to'xtatish (ichki)"""
         if not self._is_running:
             return
         
@@ -577,41 +438,24 @@ class SenderMod:
         self._save_settings()
     
     async def on_unload(self):
-        """Modul o'chirilganda"""
         await self.stop_sending()
 
 
-# ==================== INLINE CALLBACK HANDLER ====================
+# ==================== INLINE CALLBACK ====================
 
 async def handle_inline_callback(event, bot):
-    """Inline tugmalarni qayta ishlash"""
     data = event.data.decode()
     message = event.message
     
-    if data == "show_posts":
-        # Postlar ro'yxatini ko'rsatish
-        saved_posts = bot.sender_mod.config.get("saved_posts", {})
-        if not saved_posts:
+    if data == "show_post":
+        post_data = bot.sender_mod.config.get("saved_post")
+        if not post_data:
             await event.answer("Hech qanday post yo'q", alert=True)
             return
         
-        text = "📦 **Saqlangan postlar:**\n\n"
-        for pid, data in list(saved_posts.items())[:5]:
-            status = bot.sender_mod.config.get("post_status", {}).get(pid, {}).get("active", True)
-            icon = "✅" if status else "❌"
-            text += f"• `{pid}` {icon} - {data.get('text', '')[:30]}...\n"
-        
+        is_active = bot.sender_mod.config.get("post_active", False)
+        text = f"📦 Post:\n\n{post_data.get('text', '')[:300]}"
         await event.edit(text, buttons=[Button.inline("🔙 Orqaga", b"back_to_settings")])
-    
-    elif data == "start_sender":
-        await bot.sender_mod.start_sending()
-        await event.answer("✅ Yuborish boshlandi!", alert=True)
-        await event.edit("✅ Yuborish boshlandi!", buttons=[Button.inline("🔙 Orqaga", b"back_to_settings")])
-    
-    elif data == "stop_sender":
-        await bot.sender_mod.stop_sending()
-        await event.answer("⏹ Yuborish to'xtatildi!", alert=True)
-        await event.edit("⏹ Yuborish to'xtatildi!", buttons=[Button.inline("🔙 Orqaga", b"back_to_settings")])
     
     elif data == "show_stats":
         stats = bot.sender_mod.config
@@ -619,14 +463,22 @@ async def handle_inline_callback(event, bot):
             f"📊 **Statistika**\n\n"
             f"📤 Yuborilgan: {stats.get('send_count', 0)} ta\n"
             f"🕐 Oxirgi yuborish: {stats.get('last_send', 'Yoʻq')}\n"
-            f"📦 Postlar: {len(stats.get('saved_posts', {}))} ta\n"
             f"📋 Guruhlar: {len(stats.get('selected_groups', []))} ta\n"
-            f"⏱ Interval: {stats.get('interval', 60)} soniya\n"
+            f"⏱ Interval: {stats.get('interval_minutes', 5)} daqiqa\n"
             f"🔄 Holat: {'✅ Ishlamoqda' if bot.sender_mod._is_running else '❌ Toʻxtatilgan'}"
         )
         await event.edit(text, buttons=[Button.inline("🔙 Orqaga", b"back_to_settings")])
     
+    elif data == "start_sender":
+        await bot.sender_mod.start_sending()
+        await event.answer("✅ Boshlandi!", alert=True)
+        await bot.sender_mod.settings(message)
+    
+    elif data == "stop_sender":
+        await bot.sender_mod.stop_sending()
+        await event.answer("⏹ To'xtatildi!", alert=True)
+        await bot.sender_mod.settings(message)
+    
     elif data == "back_to_settings":
-        # Settings ga qaytish
         await bot.sender_mod.settings(message)
         await event.answer()
